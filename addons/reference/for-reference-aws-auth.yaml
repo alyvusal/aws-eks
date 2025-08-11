@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aws-auth
+  namespace: kube-system
+data:
+  mapRoles: |
+    - "groups":
+      - "system:bootstrappers"
+      - "system:nodes"
+      "rolearn": "arn:aws:iam::314115176041:role/devops-test-eks-nodegroup-role"
+      "username": "system:node:{{EC2PrivateDNSName}}"
+    - "groups":
+      - "system:masters"
+      "rolearn": "arn:aws:iam::314115176041:role/devops-test-eks-admin-role"
+      "username": "eks-admin"
+    - "groups":
+      - "eks-readonly-group"
+      "rolearn": "arn:aws:iam::314115176041:role/devops-test-eks-readonly-role"
+      "username": "eks-readonly"
+  mapUsers: |
+    - "groups":
+      - "system:masters"
+      "userarn": "arn:aws:iam::314115176041:user/devops-test-clsadmin2"
+      "username": "devops-test-clsadmin2"
+    - "groups":
+      - "system:masters"
+      "userarn": "arn:aws:iam::314115176041:user/devops-test-clsadmin1"
+      "username": "devops-test-clsadmin1"
