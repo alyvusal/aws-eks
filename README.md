@@ -159,6 +159,23 @@ For each addon you can find respective demo deployment files in **addons/demo-de
   kubectl apply -f service.yaml
   ```
 
+## kubectl vs IRSA vs Pod Identity
+
+They solve different problems. **IRSA does not need `aws-auth`.**
+
+| | **IRSA** | **Pod Identity** | **`aws-auth` / Access Entries** |
+| ---- | ---- | ---- | ---- |
+| Who | A **pod** (ServiceAccount) | A **pod** (ServiceAccount) | A **human / CI / node** (`kubectl`, kubelet) |
+| Direction | Pod → AWS APIs (S3, EC2, …) | Pod → AWS APIs | IAM principal → Kubernetes API |
+| Needs | Cluster OIDC provider (`eks.tf`) + role trust + SA annotation | `eks-pod-identity-agent` + EKS association (`addons.tf`) | Access Entry (`API`) or `aws-auth` (`CONFIG_MAP`) |
+| Trust | `oidc.eks.<region>.amazonaws.com` | `pods.eks.amazonaws.com` | N/A (IAM authenticator) |
+
+**kubectl:** `aws eks get-token` (IAM) → Access Entry. This lab is `authentication_mode = API`, so `kube-system/aws-auth` is ignored even if the ConfigMap exists. Extra people go in `var.eks_access_entries`, not `aws-auth`.
+
+**IRSA:** the pod presents a projected SA token to STS (`AssumeRoleWithWebIdentity`). IAM checks the OIDC provider, not the ConfigMap. Still works on `API` mode because OIDC is independent of cluster auth.
+
+**Pod Identity:** same goal as IRSA (pod AWS credentials) without OIDC/annotations. This lab uses it for vpc-cni (`aws-node`) and EBS CSI (`ebs-csi-controller-sa`). The OIDC provider remains for Helm charts that still expect IRSA.
+
 ## Adding users
 
 ### My AWS IAM user
@@ -320,7 +337,7 @@ We test here daemonsets
 
 **TODO** Addon available for EKS
 
-https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/Container-Insights-EKS-agent.html
+[Container Insights](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/deploy-container-insights-EKS.html)
 
 #### Create AWS CloudWatch Agent ConfigMap YAML Manifest
 

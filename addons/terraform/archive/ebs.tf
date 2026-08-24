@@ -1,181 +1,125 @@
 ################################################################
-#               Common: EBS CSI (Container Storage Interface)
+#               EBS CSI Controller (Helm)
 ################################################################
+# Install method: Helm chart from
+# https://github.com/kubernetes-sigs/aws-ebs-csi-driver/blob/master/docs/install.md
+#
+#   helm repo add aws-ebs-csi-driver https://kubernetes-sigs.github.io/aws-ebs-csi-driver
+#   helm upgrade --install aws-ebs-csi-driver --namespace kube-system \
+#     aws-ebs-csi-driver/aws-ebs-csi-driver
+#
+# The cluster also has EKS managed addon aws-ebs-csi-driver
+# (managed-cluster/addons.tf). Helm and the addon both own
+# kube-system/ebs-csi-controller-sa — do not apply this release while
+# the managed addon is installed.
+#
+# IAM: Pod Identity (install.md first option), not IRSA.
+# Cluster already has eks-pod-identity-agent (managed-cluster/addons.tf).
+# Controller SA: kube-system/ebs-csi-controller-sa
+# Policy: AWS-managed AmazonEBSCSIDriverPolicyV2
+#   arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicyV2
+# https://docs.aws.amazon.com/eks/latest/userguide/pod-id-agent-setup.html
+#
+# V2 scopes EC2 volume/snapshot APIs to resources tagged
+#   ebs.csi.aws.com/cluster: true
+# The driver tags volumes it creates. Statically imported volumes/snapshots
+# must get that tag or the driver cannot manage them.
+# Extra statements (not attached here) for KMS-encrypted volumes and for
+# CreateTags on existing volumes: see install.md.
+#
+# Snapshots: Helm chart does *not* install snapshot CRDs or the snapshot
+# controller. snapshot-controller is the EKS addon in managed-cluster/addons.tf
+# and must exist before this release if you use VolumeSnapshot.
+#
+# Optional from install.md (not set here):
+#   node.tolerateAllTaints=false
+#   controller.region=<aws-region>  (skip IMDS on the controller)
+# Node startup taint: ebs.csi.aws.com/agent-not-ready:NoExecute
 
-data "http" "ebs_csi_iam_policy" {
-  url = "https://raw.githubusercontent.com/kubernetes-sigs/aws-ebs-csi-driver/master/docs/example-iam-policy.json"
-
-  request_headers = {
-    Accept = "application/json"
-  }
-}
-
-output "ebs_csi_iam_policy" {
-  value = data.http.ebs_csi_iam_policy.response_body
-}
-
-resource "aws_iam_policy" "ebs_csi_iam_policy" {
-  name        = "${local.name}-AmazonEKS_EBS_CSI_Driver_Policy"
-  path        = "/"
-  description = "EBS CSI IAM Policy"
-  policy      = data.http.ebs_csi_iam_policy.response_body
-}
-
-output "ebs_csi_iam_policy_arn" {
-  value = aws_iam_policy.ebs_csi_iam_policy.arn
-}
-
-resource "aws_iam_role" "ebs_csi_iam_role" {
-  name = "${local.name}-ebs-csi-iam-role"
+resource "aws_iam_role" "ebs_csi" {
+  name        = "${local.name}-ebs-csi"
+  description = "Pod Identity role for the EBS CSI controller"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
-      {
-        Action = "sts:AssumeRoleWithWebIdentity"
-        Effect = "Allow"
-        Sid    = ""
-        Principal = {
-          Federated = "${data.terraform_remote_state.eks.outputs.aws_iam_openid_connect_provider.arn}"
-        }
-        Condition = {
-          StringEquals = {
-            "${data.terraform_remote_state.eks.outputs.aws_iam_openid_connect_provider.extract_from_arn}:sub" : "system:serviceaccount:kube-system:ebs-csi-controller-sa"
-          }
-        }
-      },
-    ]
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "pods.eks.${data.aws_partition.current.dns_suffix}" }
+      Action    = ["sts:AssumeRole", "sts:TagSession"]
+    }]
   })
 
-  tags = {
-    tag-key = "${local.name}-ebs-csi-iam-role"
-  }
+  tags = merge(local.common_tags, { Name = "${local.name}-ebs-csi" })
 }
 
-resource "aws_iam_role_policy_attachment" "ebs_csi_iam_role_policy_attach" {
-  policy_arn = aws_iam_policy.ebs_csi_iam_policy.arn
-  role       = aws_iam_role.ebs_csi_iam_role.name
+resource "aws_iam_role_policy_attachment" "ebs_csi" {
+  role       = aws_iam_role.ebs_csi.name
+  policy_arn = "arn:${data.aws_partition.current.partition}:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicyV2"
 }
 
-output "ebs_csi_iam_role_arn" {
-  description = "EBS CSI IAM Role ARN"
-  value       = aws_iam_role.ebs_csi_iam_role.arn
+# Binds kube-system/ebs-csi-controller-sa → IAM role (EKS API, not IRSA annotation).
+resource "aws_eks_pod_identity_association" "ebs_csi" {
+  cluster_name    = local.eks.name
+  namespace       = "kube-system"
+  service_account = "ebs-csi-controller-sa"
+  role_arn        = aws_iam_role.ebs_csi.arn
 }
-
-################################################################
-#               Method 1: EBS CSI driver: self-managed (helm)
-################################################################
 
 resource "helm_release" "ebs_csi_driver" {
-  depends_on = [aws_iam_role.ebs_csi_iam_role]
-  name       = "${local.name}-aws-ebs-csi-driver"
+  name       = "aws-ebs-csi-driver"
   repository = "https://kubernetes-sigs.github.io/aws-ebs-csi-driver"
   chart      = "aws-ebs-csi-driver"
   namespace  = "kube-system"
-  version    = "2.36.0"
 
-  # Default image worked as expected
-  # set {
-  #   name = "image.repository"
-  #   # Changes based on Region - This is for us-east-1
-  #   # Additional Reference: https://docs.aws.amazon.com/eks/latest/userguide/add-ons-images.html
-  #   value = "602401143452.dkr.ecr.us-east-1.amazonaws.com/eks/aws-ebs-csi-driver"
-  # }
-  set {
-    name  = "controller.serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"
-    value = aws_iam_role.ebs_csi_iam_role.arn
-  }
+  # Chart creates ebs-csi-controller-sa. Do not set
+  # eks.amazonaws.com/role-arn — that is IRSA. Pod Identity uses the association above.
+  # forceEnable: snapshot sidecar on even if CRD detection is late; CRDs come
+  # from the snapshot-controller EKS addon.
+  set = [
+    {
+      name  = "controller.serviceAccount.create"
+      value = "true"
+    },
+    {
+      name  = "controller.serviceAccount.name"
+      value = "ebs-csi-controller-sa"
+    },
+    {
+      name  = "sidecars.snapshotter.forceEnable"
+      value = "true"
+    }
+  ]
 
-  # Snapshot CRDs (https://github.com/kubernetes-csi/external-snapshotter/tree/master/client/config/crd)
-  # must be installed separately before this deployment or
-  # install CSI Snapshot Controller: EKS Add-on
-  set {
-    name  = "sidecars.snapshotter.forceEnable"
-    value = true
-  }
+  depends_on = [
+    aws_iam_role_policy_attachment.ebs_csi,
+    aws_eks_pod_identity_association.ebs_csi,
+  ]
 }
-
-# EBS CSI Helm Release Outputs
-output "ebs_csi_helm_metadata" {
-  description = "Metadata Block outlining status of the deployed release."
-  value       = helm_release.ebs_csi_driver.metadata
-}
-
-################################################################
-#               Method 2: EBS CSI driver: EKS add-on
-################################################################
-# this feature recently added and is in preview mode, has many limitations
-# but https://docs.aws.amazon.com/eks/latest/userguide/ebs-csi.html shows add-on is stable now
-
-# https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/eks_addon
-# resource "aws_eks_addon" "ebs_eks_addon" {
-#   depends_on               = [aws_iam_role_policy_attachment.ebs_csi_iam_role_policy_attach]
-#   cluster_name             = local.eks.name
-#   addon_name               = "aws-ebs-csi-driver"
-#   service_account_role_arn = aws_iam_role.ebs_csi_iam_role.arn
-# }
-
-# # EKS AddOn - EBS CSI Driver Outputs
-# output "ebs_eks_addon_ebs_csi_driver_arn" {
-#   description = "EKS Addon - EBS CSI Driver ARN"
-#   value       = aws_eks_addon.ebs_eks_addon.arn
-# }
-# output "ebs_eks_addon_ebs_csi_driver_id" {
-#   description = "EKS Addon - EBS CSI Driver ID"
-#   value       = aws_eks_addon.ebs_eks_addon.id
-# }
-
-################################################################
-#               CSI Snapshot Controller: EKS Add-on
-################################################################
-# Enable the use of snapshot functionality in compatible CSI drivers, such as the Amazon EBS CSI driver
-# It is replacement for Snapshot CRDs (https://github.com/kubernetes-csi/external-snapshotter/tree/master/client/config/crd)
-
-# resource "aws_eks_addon" "ebs_snapshot_eks_addon" {
-#   depends_on               = [aws_iam_role_policy_attachment.ebs_csi_iam_role_policy_attach]
-#   cluster_name             = local.eks.name
-#   addon_name               = "snapshot-controller"
-#   service_account_role_arn = aws_iam_role.ebs_csi_iam_role.arn
-# }
-
-# # EKS AddOn - EBS CSI Driver Outputs
-# output "ebs_eks_addon_ebs_csi_snapshotter_arn" {
-#   description = "EKS Addon - EBS CSI Snapshot Controller ARN"
-#   value       = aws_eks_addon.ebs_eks_addon.arn
-# }
-# output "ebs_eks_addon_ebs_csi_snapshotter_id" {
-#   description = "EKS Addon - EBS CSI Snapshot Controller ID"
-#   value       = aws_eks_addon.ebs_eks_addon.id
-# }
 
 ################################################################
 #               Storage Class
 ################################################################
+# Driver default type is gp3. WaitForFirstConsumer places the volume in the
+# node AZ. gp2 in-tree class (kubernetes.io/aws-ebs) is leftover from the
+# cluster bootstrap — do not use it for new PVCs.
 
-# https://registry.terraform.io/providers/hashicorp/kubernetes/latest/docs/resources/storage_class_v1
-resource "kubernetes_storage_class_v1" "ebs-sc" {
+resource "kubernetes_storage_class_v1" "ebs_sc" {
   metadata {
     name = "ebs-sc"
   }
+
   storage_provisioner    = "ebs.csi.aws.com"
   reclaim_policy         = "Delete"
   allow_volume_expansion = true
   volume_binding_mode    = "WaitForFirstConsumer"
 }
 
-# it is installed when EKS setup, no need to enable, just informational
-# resource "kubernetes_storage_class_v1" "ebs-sc" {
-#   metadata {
-#     name = "gp2"
-#   }
+output "ebs_csi_iam_role_arn" {
+  description = "EBS CSI Pod Identity IAM role ARN"
+  value       = aws_iam_role.ebs_csi.arn
+}
 
-#   parameters = {
-#     type   = "gp2"
-#     fsType = "ext4"
-#   }
-
-#   storage_provisioner    = "kubernetes.io/aws-ebs"
-#   reclaim_policy         = "Delete"
-#   allow_volume_expansion = true
-#   volume_binding_mode    = "WaitForFirstConsumer"
-# }
+output "ebs_helm_metadata" {
+  description = "Metadata Block outlining status of the deployed release."
+  value       = helm_release.ebs_csi_driver.metadata
+}

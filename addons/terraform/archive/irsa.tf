@@ -1,5 +1,5 @@
 ################################################################
-#               IRSA (Iam Roles for Service Accounts)
+#               IRSA (IAM Roles for Service Accounts)
 ################################################################
 # Give access to k8s resources (jobs, pods etc) to access AWS services (s3, lambda etc)
 

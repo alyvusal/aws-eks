@@ -3,104 +3,34 @@
 ################################################################
 
 variable "aws_region" {
-  type        = string
-  default     = "us-east-1"
+  type    = string
+  default = "us-east-1"
 }
 
 variable "environment" {
-  type        = string
-  default     = "test"
+  type    = string
+  default = "test"
 }
 
 variable "team" {
-  type        = string
-  default     = "devops"
-}
-
-variable "enable_private_subnets" {
-  default     = false
+  type    = string
+  default = "devops"
 }
 
 ################################################################
 #               VPC
 ################################################################
 
-variable "vpc_name" {
-  type        = string
-  default     = "eks"
-}
-
 variable "vpc_cidr_block" {
+  description = "IPv4 CIDR for the VPC. Public/private /24s are carved from this with cidrsubnet()."
   type        = string
   default     = "10.0.0.0/16"
 }
 
-variable "vpc_frontend_subnets" {
-  description = "Public Subnets"
-  type = map(object({
-    cidr_block = string
-    az         = string
-  }))
-  default = {
-    subnet1 = {
-      cidr_block = "10.0.1.0/24",
-      az         = "us-east-1a"
-    }
-    subnet2 = {
-      cidr_block = "10.0.2.0/24",
-      az         = "us-east-1b"
-    }
-  }
-}
-
-variable "vpc_application_subnets" {
-  description = "Private Subnets"
-  type = map(object({
-    cidr_block = string
-    az         = string
-  }))
-  default = {
-    subnet1 = {
-      cidr_block = "10.0.10.0/24",
-      az         = "us-east-1a"
-    }
-    subnet2 = {
-      cidr_block = "10.0.11.0/24",
-      az         = "us-east-1b"
-    }
-  }
-}
-
-variable "vpc_database_subnets" {
-  description = "Private Subnets"
-  type = map(object({
-    cidr_block = string
-    az         = string
-  }))
-  default = {
-    subnet1 = {
-      cidr_block = "10.0.12.0/24",
-      az         = "us-east-1a"
-    }
-    subnet2 = {
-      cidr_block = "10.0.13.0/24",
-      az         = "us-east-1b"
-    }
-  }
-}
-
-################################################################
-#               Bastion
-################################################################
-
-variable "ssh_key" {
-  type        = string
-  default     = "id_ed25519"
-}
-
-variable "bastion_instance_type" {
-  type        = string
-  default     = "t3.micro" # Free Tier Eligible
+variable "subnet_az_count" {
+  description = "How many AZs to use. EKS needs at least 2. Lab default is 2 to keep NAT/ENI cost down."
+  type        = number
+  default     = 2
 }
 
 ################################################################
@@ -108,52 +38,113 @@ variable "bastion_instance_type" {
 ################################################################
 
 variable "cluster_name" {
-  type        = string
-  default     = "eks"
+  type    = string
+  default = "eks"
 }
 
 variable "cluster_version" {
+  description = "EKS Kubernetes version. Prefer a version in standard support (see AWS EKS release calendar)."
   type        = string
-  default     = "1.31"
+  default     = "1.36"
 }
 
 variable "cluster_service_ipv4_cidr" {
-  type        = string
-  default     = "172.20.0.0/16"
+  type    = string
+  default = "172.20.0.0/16"
 }
 
-variable "cluster_endpoint_private_access" {
-  type        = bool
-  default     = false
-}
-
-variable "cluster_endpoint_public_access" {
+variable "endpoint_private_access" {
+  description = "API reachable from inside the VPC. Private nodes need this. See vpc_config in eks.tf."
   type        = bool
   default     = true
 }
 
-variable "cluster_endpoint_public_access_cidrs" {
-  type        = list(string)
-  default     = ["0.0.0.0/0"]
+variable "endpoint_public_access" {
+  description = "API on the internet (kubectl from a laptop). Prod-like: false (VPN/SSM/bastion)."
+  type        = bool
+  default     = true
 }
 
-variable "eks_oidc_root_ca_thumbprint" {
-  # https://registry.terraform.io/modules/terraform-aws-modules/eks/aws/9.0.0
-  description = "Thumbprint of Root CA for EKS OIDC, Valid until 2037"
+variable "endpoint_public_access_cidrs" {
+  type    = list(string)
+  default = ["0.0.0.0/0"]
+}
+
+variable "authentication_mode" {
+  description = "API = Access Entries only (recommended). API_AND_CONFIG_MAP = migration. CONFIG_MAP = legacy aws-auth."
   type        = string
-  default     = "9e99a48a9960b14926bb7f3b02e22da2b0ab7280"
+  default     = "API"
+}
+
+variable "bootstrap_cluster_creator_admin_permissions" {
+  description = "Grant the IAM principal that creates the cluster cluster-admin via an Access Entry. Lab: true so you are not locked out. Prod: false and list admins in eks_access_entries."
+  type        = bool
+  default     = true
+}
+
+variable "deletion_protection" {
+  description = "Block accidental cluster delete. Lab default false so terraform destroy works."
+  type        = bool
+  default     = false
+}
+
+variable "enabled_log_types" {
+  description = "Control plane logs to enable"
+  type        = list(string)
+  default     = ["api", "audit", "authenticator", "controllerManager", "scheduler"]
+}
+
+variable "cloudwatch_log_group_retention_in_days" {
+  description = "How long to keep control-plane logs. AWS default is never expire (cost)."
+  type        = number
+  default     = 14
+}
+
+variable "eks_access_entries" {
+  description = "Extra IAM principals that may authenticate to the cluster, with an AWS-managed access policy."
+  type = map(object({
+    principal_arn     = string
+    type              = optional(string, "STANDARD")
+    kubernetes_groups = optional(list(string), [])
+    policy_arn        = string
+    access_scope = object({
+      type       = string
+      namespaces = optional(list(string), null)
+    })
+  }))
+  default = {} # examples in access.tf
 }
 
 ################################################################
 #               EKS Node Groups (Worker Nodes)
 ################################################################
 
-variable "node_group_instance_types" {
+variable "instance_types" {
+  description = "Instance types for both node groups. Multiple types let EKS pick capacity."
   type        = list(string)
-  default     = ["t3.small"] # default t3.medium, for karpenter use m5.large
+  default     = ["t3.small", "t3.medium"] # default t3.medium, for karpenter use m5.large
 }
 
-variable "node_group_desired_size" {
+variable "system_node_desired_size" {
+  description = "Desired size of the tainted system node group (CoreDNS, kube-proxy, CSI)."
   type        = number
-  default     = 1 # for karpenter use 2
+  default     = 2 # for karpenter use 2
+}
+
+variable "workload_node_desired_size" {
+  description = "Desired size of the untainted workload node group (your apps). 0 if you will use Karpenter instead."
+  type        = number
+  default     = 1
+}
+
+variable "ssh_public_key" {
+  description = "SSH public key material. Empty = no key pair / no remote_access; use SSM Session Manager."
+  type        = string
+  default     = ""
+}
+
+variable "ssh_key_name" {
+  description = "Existing EC2 key pair name. Used only when ssh_public_key is empty."
+  type        = string
+  default     = ""
 }

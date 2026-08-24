@@ -3,18 +3,18 @@
 ################################################################
 
 variable "aws_region" {
-  type        = string
-  default     = "us-east-1"
+  type    = string
+  default = "us-east-1"
 }
 
 variable "environment" {
-  type        = string
-  default     = "test"
+  type    = string
+  default = "test"
 }
 
 variable "team" {
-  type        = string
-  default     = "devops"
+  type    = string
+  default = "devops"
 }
 
 ################################################################
@@ -22,6 +22,6 @@ variable "team" {
 ################################################################
 
 variable "cluster_name" {
-  type        = string
-  default     = "eks"
+  type    = string
+  default = "eks"
 }

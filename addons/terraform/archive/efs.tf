@@ -1,116 +1,104 @@
 ################################################################
 #               EFS CSI Controller (Helm)
 ################################################################
-# EFS Driver can not create EFS
-
+# Install method: Helm chart from
+# https://github.com/kubernetes-sigs/aws-efs-csi-driver/blob/master/docs/install.md
+#
+#   helm repo add aws-efs-csi-driver https://kubernetes-sigs.github.io/aws-efs-csi-driver/
+#   helm upgrade --install aws-efs-csi-driver --namespace kube-system \
+#     aws-efs-csi-driver/aws-efs-csi-driver
+#
+# The driver does *not* create the EFS file system. You still create EFS
+# (console / terraform), then:
+#
 # Static provisioning:
-#   - Create EFS manually or with terraform
-#   - Create PV and link EFS ID
-#   - Create PVC and add PV to it
-#   - Mount PV to pod
-# Dynamic provisioning:
-#   - Create EFS manually or with terraform
-#   - Create StorageClass for each EFS and link EFS ID, add mount paths
-#   - Create PVC to use SC. k8s will request EFS to create access point in EFS for PV
-#   - Mount PVC to pod
+#   - Create EFS
+#   - Create PV with the EFS ID
+#   - Create PVC bound to that PV
+#   - Mount PVC on the pod
+#
+# Dynamic provisioning (driver >= 1.2):
+#   - Create EFS
+#   - Create StorageClass with the EFS ID (driver creates access points)
+#   - Create PVC against that SC
+#   - Mount PVC on the pod
+#
+# IAM: Pod Identity (install.md first option), not IRSA.
+# Cluster already has eks-pod-identity-agent (managed-cluster/addons.tf).
+# Controller SA: kube-system/efs-csi-controller-sa
+# Policy: AWS-managed AmazonEFSCSIDriverPolicy
+# https://docs.aws.amazon.com/eks/latest/userguide/pod-id-agent-setup.html
+#
+# Alternative: EKS managed addon aws-efs-csi-driver (same IAM association).
+# This file is Helm so it matches the upstream install.md path.
+#
+# Optional Helm flags from install.md (not set here):
+#   image.repository=602401143452.dkr.ecr.<region>.amazonaws.com/eks/aws-efs-csi-driver
+#   useFIPS=true
+# Node startup taint (driver >= 1.7.2): efs.csi.aws.com/agent-not-ready:NoExecute
 
-data "http" "efs_csi_iam_policy" {
-  url = "https://raw.githubusercontent.com/kubernetes-sigs/aws-efs-csi-driver/master/docs/iam-policy-example.json"
+data "aws_partition" "current" {}
 
-  request_headers = {
-    Accept = "application/json"
-  }
-}
-
-output "efs_csi_iam_policy" {
-  value = data.http.efs_csi_iam_policy.response_body
-}
-
-resource "aws_iam_policy" "efs_csi_iam_policy" {
-  name        = "${local.name}-AmazonEKS_EFS_CSI_Driver_Policy"
-  path        = "/"
-  description = "EFS CSI IAM Policy"
-  policy      = data.http.efs_csi_iam_policy.response_body
-}
-
-output "efs_csi_iam_policy_arn" {
-  value = aws_iam_policy.efs_csi_iam_policy.arn
-}
-
-resource "aws_iam_role" "efs_csi_iam_role" {
-  name = "${local.name}-efs-csi-iam-role"
+resource "aws_iam_role" "efs_csi" {
+  name        = "${local.name}-efs-csi"
+  description = "Pod Identity role for the EFS CSI controller"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
-      {
-        Action = "sts:AssumeRoleWithWebIdentity"
-        Effect = "Allow"
-        Sid    = ""
-        Principal = {
-          Federated = "${data.terraform_remote_state.eks.outputs.aws_iam_openid_connect_provider.arn}"
-        }
-        Condition = {
-          StringEquals = {
-            "${data.terraform_remote_state.eks.outputs.aws_iam_openid_connect_provider.extract_from_arn}:sub" : "system:serviceaccount:kube-system:efs-csi-controller-sa"
-          }
-        }
-      },
-    ]
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "pods.eks.${data.aws_partition.current.dns_suffix}" }
+      Action    = ["sts:AssumeRole", "sts:TagSession"]
+    }]
   })
 
-  tags = {
-    tag-key = "efs-csi"
-  }
+  tags = merge(local.common_tags, { Name = "${local.name}-efs-csi" })
 }
 
-resource "aws_iam_role_policy_attachment" "efs_csi_iam_role_policy_attach" {
-  policy_arn = aws_iam_policy.efs_csi_iam_policy.arn
-  role       = aws_iam_role.efs_csi_iam_role.name
+resource "aws_iam_role_policy_attachment" "efs_csi" {
+  role       = aws_iam_role.efs_csi.name
+  policy_arn = "arn:${data.aws_partition.current.partition}:iam::aws:policy/service-role/AmazonEFSCSIDriverPolicy"
+}
+
+# Binds kube-system/efs-csi-controller-sa → IAM role (EKS API, not IRSA annotation).
+resource "aws_eks_pod_identity_association" "efs_csi" {
+  cluster_name    = local.eks.name
+  namespace       = "kube-system"
+  service_account = "efs-csi-controller-sa"
+  role_arn        = aws_iam_role.efs_csi.arn
+}
+
+resource "helm_release" "efs_csi_driver" {
+  name       = "aws-efs-csi-driver"
+  repository = "https://kubernetes-sigs.github.io/aws-efs-csi-driver"
+  chart      = "aws-efs-csi-driver"
+  namespace  = "kube-system"
+
+  # Chart creates efs-csi-controller-sa. Do not set
+  # eks.amazonaws.com/role-arn — that is IRSA. Pod Identity uses the association above.
+  set = [
+    {
+      name  = "controller.serviceAccount.create"
+      value = "true"
+    },
+    {
+      name  = "controller.serviceAccount.name"
+      value = "efs-csi-controller-sa"
+    }
+  ]
+
+  depends_on = [
+    aws_iam_role_policy_attachment.efs_csi,
+    aws_eks_pod_identity_association.efs_csi,
+  ]
 }
 
 output "efs_csi_iam_role_arn" {
-  description = "EFS CSI IAM Role ARN"
-  value       = aws_iam_role.efs_csi_iam_role.arn
-}
-
-# we can install as eks add-on also
-resource "helm_release" "efs_csi_driver" {
-  depends_on = [aws_iam_role.efs_csi_iam_role]
-  name       = "aws-efs-csi-driver"
-
-  repository = "https://kubernetes-sigs.github.io/aws-efs-csi-driver"
-  chart      = "aws-efs-csi-driver"
-
-  namespace = "kube-system"
-
-  set {
-    name  = "image.repository"
-    value = "602401143452.dkr.ecr.us-east-1.amazonaws.com/eks/aws-efs-csi-driver" # Changes based on Region - This is for us-east-1 Additional Reference: https://docs.aws.amazon.com/eks/latest/userguide/add-ons-images.html
-  }
-
-  set {
-    name  = "controller.serviceAccount.create"
-    value = "true"
-  }
-
-  set {
-    name  = "controller.serviceAccount.name"
-    value = "efs-csi-controller-sa"
-  }
-
-  set {
-    name  = "controller.serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"
-    value = aws_iam_role.efs_csi_iam_role.arn
-  }
-
+  description = "EFS CSI Pod Identity IAM role ARN"
+  value       = aws_iam_role.efs_csi.arn
 }
 
 output "efs_helm_metadata" {
   description = "Metadata Block outlining status of the deployed release."
   value       = helm_release.efs_csi_driver.metadata
 }
-
-################################################################
-#               EFS CSI Controller (Add-on)
-################################################################

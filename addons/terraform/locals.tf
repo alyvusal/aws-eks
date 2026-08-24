@@ -1,13 +1,22 @@
+data "aws_partition" "current" {}
+
 data "aws_eks_cluster_auth" "cluster" {
   name = local.eks.name
 }
 
+# data "terraform_remote_state" "eks" {
+#   backend = "s3"
+#   config = {
+#     region = "us-east-1"
+#     bucket = "alyvusal-terraform-backend"
+#     key    = "eks/terraform.tfstate"
+#   }
+# }
+
 data "terraform_remote_state" "eks" {
-  backend = "s3"
+  backend = "local"
   config = {
-    region = "us-east-1"
-    bucket = "alyvusal-terraform-backend"
-    key    = "eks/terraform.tfstate"
+    path = "../../managed-cluster/terraform/terraform.tfstate"
   }
 }
 

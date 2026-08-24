@@ -4,34 +4,34 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "5.72.1"
+      version = "6.61.0"
     }
     kubernetes = {
       source  = "hashicorp/kubernetes"
-      version = "2.33.0"
+      version = "3.2.1"
     }
     helm = {
       source  = "hashicorp/helm"
-      version = "2.16.0"
+      version = "3.2.0"
     }
     http = {
       source  = "hashicorp/http"
-      version = "3.4.5"
+      version = "3.6.1"
     }
     kubectl = {
       source  = "gavinbunney/kubectl"
-      version = "1.14.0"
+      version = "1.19.0"
     }
   }
 
-  backend "s3" {
-    region       = "us-east-1"
-    bucket       = "alyvusal-terraform-backend"
-    key          = "eks/terraform.tfstate"
-    encrypt      = true
-    use_lockfile = true
-    # dynamodb_table = "eks"  # For State Locking
-  }
+  # backend "s3" {
+  #   region       = "us-east-1"
+  #   bucket       = "alyvusal-terraform-backend"
+  #   key          = "eks/terraform.tfstate"
+  #   encrypt      = true
+  #   use_lockfile = true
+  #   # dynamodb_table = "eks"  # For State Locking
+  # }
 }
 
 provider "aws" {
@@ -45,7 +45,7 @@ provider "kubernetes" {
 }
 
 provider "helm" {
-  kubernetes {
+  kubernetes = {
     host                   = local.eks.host
     cluster_ca_certificate = local.eks.cluster_ca_certificate
     token                  = local.eks_auth_token
